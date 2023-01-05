@@ -80,18 +80,20 @@ pub const Elf = struct {
             for (relocs) |reloca| {
                 const reloc_addr_bytes = blk: {
                     if (reloca.size == 1) {
-                        break :blk byte.intToLEBytes(u8, @intCast(u8, secs.items[reloca.sec.idx].vaddr + reloca.ofst_in_sec - secs.items[0].vaddr - reloca.loc - reloca.size));
+                        break :blk try byte.intToLEBytes(u8, allocator, @intCast(u8, secs.items[reloca.sec.idx].vaddr + reloca.ofst_in_sec - secs.items[0].vaddr - reloca.loc - reloca.size));
                     } else if (reloca.size == 2) {
-                        break :blk byte.intToLEBytes(u16, @intCast(u16, secs.items[reloca.sec.idx].vaddr + reloca.ofst_in_sec - secs.items[0].vaddr - reloca.loc - reloca.size));
+                        break :blk try byte.intToLEBytes(u16, allocator, @intCast(u16, secs.items[reloca.sec.idx].vaddr + reloca.ofst_in_sec - secs.items[0].vaddr - reloca.loc - reloca.size));
                     } else if (reloca.size == 4) {
-                        break :blk byte.intToLEBytes(u32, @intCast(u32, secs.items[reloca.sec.idx].vaddr + reloca.ofst_in_sec - secs.items[0].vaddr - reloca.loc - reloca.size));
+                        break :blk try byte.intToLEBytes(u32, allocator, @intCast(u32, secs.items[reloca.sec.idx].vaddr + reloca.ofst_in_sec - secs.items[0].vaddr - reloca.loc - reloca.size));
                     } else if (reloca.size == 8) {
-                        break :blk byte.intToLEBytes(u64, @intCast(u64, secs.items[reloca.sec.idx].vaddr + reloca.ofst_in_sec - secs.items[0].vaddr - reloca.loc - reloca.size));
+                        break :blk try byte.intToLEBytes(u64, allocator, @intCast(u64, secs.items[reloca.sec.idx].vaddr + reloca.ofst_in_sec - secs.items[0].vaddr - reloca.loc - reloca.size));
                     }
                     return error.InvalidRelocationSize;
                 };
+								defer reloc_addr_bytes.deinit();
+								errdefer reloc_addr_bytes.deinit();
                 std.log.info("Replacing at {d} to {d} with 0x{x}", .{ reloca.loc, reloca.size, secs.items[reloca.sec.idx].vaddr + reloca.ofst_in_sec });
-                try secs.items[0].data.replaceRange(reloca.loc, reloca.size, try reloc_addr_bytes);
+                try secs.items[0].data.replaceRange(reloca.loc, reloca.size, reloc_addr_bytes.items);
             }
         }
 
