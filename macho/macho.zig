@@ -72,6 +72,11 @@ pub const Macho = struct {
                         vm_ofst = nextOffset(vm_ofst, sec_data.items.len, page_size);
                         sec_ofst = nextOffset(sec_ofst, sec_data.items.len, page_size);
                     },
+                    .Rodata => {
+                        try secs.append(MachoSec.initFromRoData(sec_data, page_size, vm_ofst, vm_size + vm_ofst));
+                        vm_ofst = nextOffset(vm_ofst, sec_data.items.len, page_size);
+                        sec_ofst = nextOffset(sec_ofst, sec_data.items.len, page_size);
+                    },
                     else => return error.UnsupportedSection,
                 }
             } else if (comm_sec.type == .Text) {

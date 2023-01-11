@@ -5,7 +5,7 @@ const LoadCmdSeg = @import("ldcmd.zig").LoadCmdSeg;
 const SectionType = enum {
     Text,
     Data,
-    // RoData,
+    Rodata,
 };
 
 pub const Section = struct {
@@ -33,13 +33,13 @@ pub const Section = struct {
         return Self{ .type = .Data, .data = sec_data, .offset = offset, .vaddr = vaddr, .padding_bytes_size = padding_bytes_size };
     }
 
-    // pub fn initFromRoData(sec_data: std.ArrayList(u8), align_size: u16, offset: u64, vaddr: u64) Self {
-    //     var padding_bytes_size: u16 = 0;
-    //     if (align_size >= 2) {
-    //         padding_bytes_size = align_size - @intCast(u16, sec_data.items.len % align_size);
-    //     }
-    //     return Self{ .type = .RoData, .data = sec_data, .offset = offset, .vaddr = vaddr, .padding_bytes_size = padding_bytes_size };
-    // }
+    pub fn initFromRoData(sec_data: std.ArrayList(u8), align_size: u16, offset: u64, vaddr: u64) Self {
+        var padding_bytes_size: u16 = 0;
+        if (align_size >= 2) {
+            padding_bytes_size = align_size - @intCast(u16, sec_data.items.len % align_size);
+        }
+        return Self{ .type = .Rodata, .data = sec_data, .offset = offset, .vaddr = vaddr, .padding_bytes_size = padding_bytes_size };
+    }
 
     pub inline fn ovlpSize(self: Self) u64 {
         return if (self.ovlp_ofst) |ovlp_ofst| ovlp_ofst else 0;
@@ -56,6 +56,7 @@ pub const Section = struct {
         return switch (self.type) {
             .Text => LoadCmdSeg.initText(self.offset, self.alignedSize(alignment)),
             .Data => LoadCmdSeg.initData(self.offset, self.alignedSize(alignment)),
+            .Rodata => LoadCmdSeg.initRoData(self.offset, self.alignedSize(alignment)),
         };
     }
 };
