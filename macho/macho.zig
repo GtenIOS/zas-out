@@ -1,7 +1,8 @@
 const std = @import("std");
-const MachoSec = @import("section.zig").Section;
+const MachoSeg = @import("segment.zig").Segment;
 const Section = @import("common").section.Section;
 const SectionType = @import("common").section.SectionType;
+const MachoSec = @import("section.zig").Section;
 const reloc = @import("common").reloc;
 const Relocation = reloc.Relocation;
 const RelocType = reloc.RelocType;
@@ -28,84 +29,159 @@ const ld_cmd_dysymtab_size = 80;
 const ld_cmd_dylinker_size = 32;
 const ld_cmd_dylib_size = 56;
 const ld_cmd_main_size = 24;
+const sec_hdr_size = 80;
 pub const Macho = struct {
     inline fn nextOffset(start: u64, len: u64, p_align: u16) u64 {
         const curr_end = start + len;
         if (p_align > 1) {
-            std.log.info("curr end: {d}, rem: {d} next offset: {d} align_size: {d}", .{ curr_end, p_align - curr_end % p_align, curr_end + (p_align - curr_end % p_align), p_align });
-            const rem_size = p_align - (curr_end % p_align);
+            const rem_bytes = curr_end % p_align;
+            std.log.info("curr end: {d}, rem: {d} next offset: {d} align_size: {d}", .{ curr_end, if (rem_bytes == 0) 0 else p_align - rem_bytes, if (rem_bytes == 0) curr_end else curr_end + (p_align - rem_bytes), p_align });
+            const rem_size = if (rem_bytes == 0) 0 else p_align - rem_bytes;
             return curr_end + rem_size;
         } else return curr_end;
     }
 
     pub fn genPieExe64(allocator: std.mem.Allocator, sections: []const Section, relocations: ?[]const Relocation, out_file_path: []const u8) !void {
+        const text_idx: u64 = 0;
         if (sections.len == 0) return error.MissingTextSection;
-        if (sections[0].type != .Text) return error.FirstSectionShouldAlwaysBeText;
+        if (sections[text_idx].type != .Text) return error.FirstSectionShouldAlwaysBeText;
 
         if (relocations) |relocs| {
             for (relocs) |reloca| if (reloca.type == RelocType.Abs) return error.AbsoluteRelocationInPIE;
         }
 
-        const ld_cmds_size = (sections.len + 2) * ld_cmd_seg_size + ld_cmd_dyldinfo_size + ld_cmd_symtab_size + ld_cmd_dysymtab_size + ld_cmd_dylinker_size + ld_cmd_dylib_size + ld_cmd_main_size;
-        const no_ld_cmds = 8 + sections.len;
-
-        var secs: std.ArrayList(MachoSec) = std.ArrayList(MachoSec).init(allocator);
-        defer secs.deinit();
-
-        var found_text: bool = false;
-        var text_idx: u64 = 0;
-        var vm_ofst: u64 = 0;
-        var sec_ofst: u64 = @sizeOf(Mach64Hdr) + ld_cmds_size;
-        for (sections) |comm_sec, i| {
-            if (comm_sec.data) |sec_data| {
-                switch (comm_sec.type) {
-                    .Text => {
-                        found_text = true;
-                        text_idx = i;
-
-                        try secs.append(MachoSec.initFromText(sec_data, page_size, sec_ofst, vm_ofst, vm_size + vm_ofst));
-                        vm_ofst = nextOffset(sec_ofst, sec_data.items.len, page_size);
-                        sec_ofst = nextOffset(sec_ofst, sec_data.items.len, page_size);
-                    },
-                    .Data => {
-                        try secs.append(MachoSec.initFromData(sec_data, page_size, vm_ofst, vm_size + vm_ofst));
-                        vm_ofst = nextOffset(vm_ofst, sec_data.items.len, page_size);
-                        sec_ofst = nextOffset(sec_ofst, sec_data.items.len, page_size);
-                    },
-                    .Rodata => {
-                        try secs.append(MachoSec.initFromRoData(sec_data, page_size, vm_ofst, vm_size + vm_ofst));
-                        vm_ofst = nextOffset(vm_ofst, sec_data.items.len, page_size);
-                        sec_ofst = nextOffset(sec_ofst, sec_data.items.len, page_size);
-                    },
-                    else => return error.UnsupportedSection,
-                }
-            } else if (comm_sec.type == .Text) {
-                return error.EmptyTextSection;
+        var seg_count: usize = 0;
+        var text_seg_size: usize = 0;
+        var text_sec_size: usize = 0;
+        var data_seg_file_size: usize = 0;
+        var data_seg_virt_size: usize = 0;
+        var added_text_seg: bool = false;
+        var added_data_seg: bool = false;
+        for (sections) |comm_sec| {
+            switch (comm_sec.type) {
+                .Text => {
+                    if (!added_text_seg) {
+                        added_text_seg = true;
+                        seg_count += 1;
+                    }
+                    if (comm_sec.data) |sec_data| {
+                        text_seg_size += sec_data.items.len;
+                        text_sec_size = sec_data.items.len;
+                    }
+                },
+                .Rodata => {
+                    if (!added_text_seg) {
+                        added_text_seg = true;
+                        seg_count += 1;
+                    }
+                    if (comm_sec.data) |sec_data| {
+                        text_seg_size += sec_data.items.len;
+                    }
+                },
+                .Data => {
+                    if (!added_data_seg) {
+                        added_data_seg = true;
+                        seg_count += 1;
+                    }
+                    if (comm_sec.data) |sec_data| {
+                        data_seg_file_size += sec_data.items.len;
+                        data_seg_virt_size += sec_data.items.len;
+                    }
+                },
+                .Bss => {
+                    if (!added_data_seg) {
+                        added_data_seg = true;
+                        seg_count += 1;
+                    }
+                    data_seg_virt_size += comm_sec.res_size orelse 0;
+                },
             }
         }
 
-        if (!found_text) return error.MissingTextSection;
+        const ld_cmds_size = (seg_count + 2) * ld_cmd_seg_size + ld_cmd_dyldinfo_size + ld_cmd_symtab_size + ld_cmd_dysymtab_size + ld_cmd_dylinker_size + ld_cmd_dylib_size + ld_cmd_main_size + (sections.len * sec_hdr_size);
+        const no_ld_cmds = 8 + seg_count;
 
-        const main_entry = @sizeOf(Mach64Hdr) + ld_cmds_size + secs.items[0].padding_bytes_size;
+        var segs: std.ArrayList(MachoSeg) = std.ArrayList(MachoSeg).init(allocator);
+        defer segs.deinit();
+        var secs: std.ArrayList(MachoSec) = std.ArrayList(MachoSec).init(allocator);
+        defer secs.deinit();
+
+        var sec_ofst: u64 = @sizeOf(Mach64Hdr) + ld_cmds_size;
+        const text_seg_padding = page_size - (@intCast(u16, (sec_ofst + text_seg_size)) % page_size);
+        const text_sec_start_ofst = sec_ofst + text_seg_padding;
+        const data_seg_start_ofst = page_size - ((text_sec_start_ofst + text_seg_size) % page_size);
+        std.log.info("Data seg start: 0x{x}", .{data_seg_start_ofst});
+        var data_seg_secs: std.ArrayList(*const MachoSec) = std.ArrayList(*const MachoSec).init(allocator);
+        defer data_seg_secs.deinit();
+        var text_seg_secs: std.ArrayList(*const MachoSec) = std.ArrayList(*const MachoSec).init(allocator);
+        defer text_seg_secs.deinit();
+        for (sections) |comm_sec| {
+            if (comm_sec.data) |sec_data| {
+                switch (comm_sec.type) {
+                    .Text => {
+                        const sec = MachoSec.initText(sec_data, text_sec_start_ofst, vm_size + text_sec_start_ofst);
+                        try secs.append(sec);
+                        try text_seg_secs.append(&sec);
+                    },
+                    .Rodata => {
+                        const const_sec_start_ofst = text_sec_start_ofst + text_sec_size;
+                        const sec = MachoSec.initConst(sec_data, const_sec_start_ofst, vm_size + const_sec_start_ofst);
+                        try secs.append(sec);
+                        try text_seg_secs.append(&sec);
+                    },
+                    .Data => {
+                        const sec = MachoSec.initData(sec_data, data_seg_start_ofst, vm_size + data_seg_start_ofst);
+                        try secs.append(sec);
+                        try data_seg_secs.append(&sec);
+                    },
+                    else => {},
+                }
+            } 
+            else if (comm_sec.type == .Text) {
+                return error.EmptyTextSection;
+            } 
+            else if (comm_sec.type == .Bss) {
+                if ((comm_sec.res_size orelse 0) > 0) {
+                    const sec = MachoSec.initBss(vm_size + data_seg_start_ofst + data_seg_file_size, comm_sec.res_size.?);
+                    try secs.append(sec);
+                    try data_seg_secs.append(&sec);
+                }
+            }
+            else {
+                return error.UnsupportedEmptyDataSection;
+            }
+        } 
+
+        const text_seg: MachoSeg = MachoSeg.initFromText(text_seg_secs, page_size, sec_ofst, 0, vm_size);
+        try segs.append(text_seg);
+        var vm_ofst: u64 = nextOffset(0, text_seg.secSize(false), page_size);
+
+        if (added_data_seg) {
+            const data_seg: MachoSeg = MachoSeg.initFromData(data_seg_secs, page_size, vm_ofst, vm_size + vm_ofst); 
+            try segs.append(data_seg);
+        }
+        vm_ofst = nextOffset(data_seg_start_ofst, data_seg_virt_size, page_size);
+        sec_ofst = nextOffset(data_seg_start_ofst, data_seg_file_size, page_size);
+        const main_entry = @sizeOf(Mach64Hdr) + ld_cmds_size + segs.items[0].padding_bytes_size; // Note: section `.text` does not begin with actual instruction, but padding instead. Hence the `padding_bytes_size` in calculation
         // Relocations
         if (relocations) |relocs| {
             for (relocs) |reloca| {
                 const reloc_addr_bytes = blk: {
                     if (reloca.size == 1) {
-                        break :blk try byte.intToLEBytes(u8, allocator, @intCast(u8, secs.items[reloca.sec.idx].vaddr + reloca.ofst_in_sec - secs.items[text_idx].vaddr - main_entry - reloca.loc - reloca.size));
+                        break :blk try byte.intToLEBytes(u8, allocator, @intCast(u8, secs.items[reloca.sec.idx].vaddr + reloca.ofst_in_sec - secs.items[text_idx].vaddr - reloca.loc - reloca.size));
                     } else if (reloca.size == 2) {
-                        break :blk try byte.intToLEBytes(u16, allocator, @intCast(u16, secs.items[reloca.sec.idx].vaddr + reloca.ofst_in_sec - secs.items[text_idx].vaddr - main_entry - reloca.loc - reloca.size));
+                        break :blk try byte.intToLEBytes(u16, allocator, @intCast(u16, secs.items[reloca.sec.idx].vaddr + reloca.ofst_in_sec - secs.items[text_idx].vaddr - reloca.loc - reloca.size));
                     } else if (reloca.size == 4) {
-                        break :blk try byte.intToLEBytes(u32, allocator, @intCast(u32, secs.items[reloca.sec.idx].vaddr + reloca.ofst_in_sec - secs.items[text_idx].vaddr - main_entry - reloca.loc - reloca.size));
+                        break :blk try byte.intToLEBytes(u32, allocator, @intCast(u32, secs.items[reloca.sec.idx].vaddr + reloca.ofst_in_sec - secs.items[text_idx].vaddr - reloca.loc - reloca.size));
                     } else if (reloca.size == 8) {
-                        break :blk try byte.intToLEBytes(u64, allocator, @intCast(u64, secs.items[reloca.sec.idx].vaddr + reloca.ofst_in_sec - secs.items[text_idx].vaddr - main_entry - reloca.loc - reloca.size));
+                        break :blk try byte.intToLEBytes(u64, allocator, @intCast(u64, secs.items[reloca.sec.idx].vaddr + reloca.ofst_in_sec - secs.items[text_idx].vaddr - reloca.loc - reloca.size));
                     }
                     return error.InvalidRelocationSize;
                 };
                 defer reloc_addr_bytes.deinit();
                 errdefer reloc_addr_bytes.deinit();
                 std.log.info("Replacing at {d} to {d} with 0x{x}", .{ reloca.loc, reloca.size, secs.items[reloca.sec.idx].vaddr + reloca.ofst_in_sec });
-                try secs.items[0].data.replaceRange(reloca.loc, reloca.size, reloc_addr_bytes.items);
+                try secs.items[text_idx].data.?.replaceRange(reloca.loc, reloca.size, reloc_addr_bytes.items);
             }
         }
 
@@ -121,13 +197,17 @@ pub const Macho = struct {
         try file.writer().writeAll(std.mem.asBytes(&ld_cmd_page_zero));
 
         // Section load commands
-        for (secs.items) |sec| {
-            const ld_cmd_sec = sec.toLoadCmdSeg(page_size);
+        for (segs.items) |seg| {
+            const ld_cmd_sec = seg.toLoadCmdSeg(page_size);
             try file.writer().writeAll(std.mem.asBytes(&ld_cmd_sec));
+            for (seg.secs.items) |sec| {
+                const sec_hdr = sec.toHeader();
+                try file.writer().writeAll(std.mem.asBytes(&sec_hdr));
+            }
         }
 
         // Linkedit
-        const ld_cmd_link_edit = LoadCmdSeg.initLinkEdit(sec_ofst);
+        const ld_cmd_link_edit = LoadCmdSeg.initLinkEdit(vm_ofst, sec_ofst);
         try file.writer().writeAll(std.mem.asBytes(&ld_cmd_link_edit));
 
         // DyldInfo
@@ -155,17 +235,21 @@ pub const Macho = struct {
         try file.writer().writeAll(std.mem.asBytes(&ld_cmd_main));
 
         // Sections
-        for (secs.items) |sec, i| {
+        for (segs.items) |seg, i| {
             // Text section is preceded by it's padding bytes
             // Padding bytes
             // For text section, padding byte is 0x90, i.e. nop instruction
             // For all other sections, padding byte is 0x0
-            if (i == 0 and sec.padding_bytes_size > 0) try file.writer().writeByteNTimes(0x90, sec.padding_bytes_size);
+            if (i == 0 and seg.padding_bytes_size > 0) try file.writer().writeByteNTimes(0x90, seg.padding_bytes_size);
 
-            try file.writer().writeAll(sec.data.items);
+            for (seg.secs.items) |sec| {
+                if (sec.data) |sec_data| {
+                    try file.writer().writeAll(sec_data.items);
+                }
+            }
 
             // For section(s) othar than Text, they are followed by their padding bytes
-            if (i > 0 and sec.padding_bytes_size > 0) try file.writer().writeByteNTimes(0x0, sec.padding_bytes_size);
+            if (i > 0 and seg.padding_bytes_size > 0) try file.writer().writeByteNTimes(0x0, seg.padding_bytes_size);
         }
 
         // Export info

@@ -1,62 +1,85 @@
 const std = @import("std");
-const CommSection = @import("common").section.Section;
-const LoadCmdSeg = @import("ldcmd.zig").LoadCmdSeg;
-
+const LdCmd = @import("ldcmd.zig");
 const SectionType = enum {
     Text,
+    Const,
     Data,
-    Rodata,
+    Bss,
 };
 
 pub const Section = struct {
     type: SectionType,
-    data: std.ArrayList(u8),
-    ovlp_ofst: ?u64 = null,
+    data: ?std.ArrayList(u8),
     offset: u64,
     vaddr: u64,
-    padding_bytes_size: u16,
+    res_size: ?usize = null,
+
     const Self = @This();
-
-    pub fn initFromText(sec_data: std.ArrayList(u8), align_size: u16, ovlp_ofst: u64, offset: u64, vaddr: u64) Self {
-        var padding_bytes_size: u16 = 0;
-        if (align_size >= 2) {
-            padding_bytes_size = align_size - @intCast(u16, (ovlp_ofst + sec_data.items.len) % align_size);
-        }
-        return Self{ .type = .Text, .data = sec_data, .ovlp_ofst = ovlp_ofst, .offset = offset, .vaddr = vaddr, .padding_bytes_size = padding_bytes_size };
+    pub fn initText(data: std.ArrayList(u8), offset: u64, vaddr: u64) Self {
+        return Self { .type = .Text, .data = data, .offset = offset, .vaddr = vaddr };
     }
 
-    pub fn initFromData(sec_data: std.ArrayList(u8), align_size: u16, offset: u64, vaddr: u64) Self {
-        var padding_bytes_size: u16 = 0;
-        if (align_size >= 2) {
-            padding_bytes_size = align_size - @intCast(u16, sec_data.items.len % align_size);
-        }
-        return Self{ .type = .Data, .data = sec_data, .offset = offset, .vaddr = vaddr, .padding_bytes_size = padding_bytes_size };
+    pub fn initConst(data: std.ArrayList(u8), offset: u64, vaddr: u64) Self {
+        return Self { .type = .Const, .data = data, .offset = offset, .vaddr = vaddr };
     }
 
-    pub fn initFromRoData(sec_data: std.ArrayList(u8), align_size: u16, offset: u64, vaddr: u64) Self {
-        var padding_bytes_size: u16 = 0;
-        if (align_size >= 2) {
-            padding_bytes_size = align_size - @intCast(u16, sec_data.items.len % align_size);
-        }
-        return Self{ .type = .Rodata, .data = sec_data, .offset = offset, .vaddr = vaddr, .padding_bytes_size = padding_bytes_size };
+    pub fn initData(data: std.ArrayList(u8), offset: u64, vaddr: u64) Self {
+        return Self { .type = .Data, .data = data, .offset = offset, .vaddr = vaddr };
     }
 
-    pub inline fn ovlpSize(self: Self) u64 {
-        return if (self.ovlp_ofst) |ovlp_ofst| ovlp_ofst else 0;
+    pub fn initBss(vaddr: u64, res_size: usize) Self {
+        if (res_size == 0) { @panic("Size must not be zero"); }
+        return Self { .type = .Bss, .data = null, .offset = 0, .vaddr = vaddr, .res_size = res_size };
     }
 
-    pub inline fn alignedSize(self: Self, alignment: u16) u64 {
-        const sec_size = self.ovlpSize() + self.data.items.len;
-        if (alignment < 2) return sec_size;
-        const rem_bytes = alignment - (sec_size % alignment);
-        return sec_size + rem_bytes;
-    }
-
-    pub inline fn toLoadCmdSeg(self: Self, alignment: u16) LoadCmdSeg {
-        return switch (self.type) {
-            .Text => LoadCmdSeg.initText(self.offset, self.alignedSize(alignment)),
-            .Data => LoadCmdSeg.initData(self.offset, self.alignedSize(alignment)),
-            .Rodata => LoadCmdSeg.initRoData(self.offset, self.alignedSize(alignment)),
+    pub fn toHeader(self: Self) SectionHeader {
+        const size: usize = blk: {
+            if (self.data) |data| { break :blk data.items.len; } else { break :blk self.res_size orelse 0; }
         };
+        return switch (self.type) {
+            .Text => SectionHeader.initText(self.vaddr, size, @intCast(u32, self.offset)),
+            .Const => SectionHeader.initConst(self.vaddr, size, @intCast(u32, self.offset)),
+            .Data => SectionHeader.initData(self.vaddr, size, @intCast(u32, self.offset)),
+            .Bss => SectionHeader.initBss(self.vaddr, size, @intCast(u32, self.offset)),
+        };
+    }
+};
+
+const sec_text: [16]u8 = [16]u8 { '_', '_', 't', 'e', 'x', 't', 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0 };
+const sec_const: [16]u8 = [16]u8 { '_', '_', 'c', 'o', 'n', 's', 't', 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0 };
+const sec_data: [16]u8 = [16]u8 { '_', '_', 'd', 'a', 't', 'a', 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0 };
+const sec_bss: [16]u8 = [16]u8 { '_', '_', 'b', 's', 's', 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0 };
+const s_attr_pure_instrs: u32 = 0x80000000;
+const s_attr_some_instrs: u32 = 0x00000400;
+const s_zerofill: u32 = 0x1;
+pub const SectionHeader = struct {
+    name: [16]u8,
+    seg_name: [16]u8,
+    addr: u64,
+    size: u64,
+    offset: u32,
+    alignment: u32 = 0,
+    reloc_ofst: u32 = 0,
+    no_of_relocs: u32 = 0,
+    flags: u32 = 0,
+    res1: u32 = 0,
+    res2: u32 = 0,
+    res3: u32 = 0,
+
+    const Self = @This();
+    pub fn initText(addr: u64, size: u64, offset: u32) Self {
+        return Self { .name = sec_text, .seg_name = LdCmd.seg_text, .addr = addr, .size = size, .offset = offset, .flags = s_attr_pure_instrs | s_attr_some_instrs };
+    }
+
+    pub fn initConst(addr: u64, size: u64, offset: u32) Self {
+        return Self { .name = sec_const, .seg_name = LdCmd.seg_text, .addr = addr, .size = size, .offset = offset };
+    }
+
+    pub fn initData(addr: u64, size: u64, offset: u32) Self {
+        return Self { .name = sec_data, .seg_name = LdCmd.seg_data, .addr = addr, .size = size, .offset = offset };
+    }
+
+    pub fn initBss(addr: u64, size: u64, offset: u32) Self {
+        return Self { .name = sec_bss, .seg_name = LdCmd.seg_data, .addr = addr, .size = size, .offset = offset, .flags = s_zerofill };
     }
 };

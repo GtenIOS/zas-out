@@ -2,7 +2,6 @@ pub const lc_segment_64 = 0x00000019;
 pub const seg_page_zero: [16]u8 = [16]u8{ '_', '_', 'P', 'A', 'G', 'E', 'Z', 'E', 'R', 'O', 0, 0, 0, 0, 0, 0 };
 pub const seg_text: [16]u8 = [16]u8{ '_', '_', 'T', 'E', 'X', 'T', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 pub const seg_data: [16]u8 = [16]u8{ '_', '_', 'D', 'A', 'T', 'A', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-pub const seg_rodata: [16]u8 = [16]u8{ '_', '_', 'R', 'O', 'D', 'A', 'T', 'A', 0, 0, 0, 0, 0, 0, 0, 0 };
 pub const seg_linkedit: [16]u8 = [16]u8{ '_', '_', 'L', 'I', 'N', 'K', 'E', 'D', 'I', 'T', 0, 0, 0, 0, 0, 0 };
 pub const vm_size = 0x0000000100000000;
 pub const vm_prot_none = 0x00000000;
@@ -11,6 +10,7 @@ pub const vm_prot_write = 0x00000002;
 pub const vm_prot_execute = 0x00000004;
 
 pub const ld_cmd_seg_size = 72;
+pub const sec_hdr_size = 80;
 pub const LoadCmdSeg = struct {
     cmd: u32 = lc_segment_64,
     cmd_sz: u32 = ld_cmd_seg_size,
@@ -33,20 +33,16 @@ pub const LoadCmdSeg = struct {
         return Self{ .seg_name = seg_page_zero, .vm_addr = 0, .vm_sz = vm_size, .file_ofst = 0, .file_sz = 0, .max_vm_prot = vm_prot_none, .init_vm_prot = vm_prot_none };
     }
 
-    pub fn initText(ofst: u64, size: u64) Self {
-        return Self{ .seg_name = seg_text, .vm_addr = vm_size + ofst, .vm_sz = size, .file_ofst = ofst, .file_sz = size, .max_vm_prot = vm_prot_read | vm_prot_execute, .init_vm_prot = vm_prot_read | vm_prot_execute };
+    pub fn initText(ofst: u64, size: u64, no_of_secs: u32) Self {
+        return Self{ .cmd_sz = ld_cmd_seg_size + (sec_hdr_size * no_of_secs), .seg_name = seg_text, .vm_addr = vm_size + ofst, .vm_sz = size, .file_ofst = ofst, .file_sz = size, .max_vm_prot = vm_prot_read | vm_prot_execute, .init_vm_prot = vm_prot_read | vm_prot_execute, .no_of_secs = no_of_secs };
     }
 
-    pub fn initData(ofst: u64, size: u64) Self {
-        return Self{ .seg_name = seg_data, .vm_addr = vm_size + ofst, .vm_sz = size, .file_ofst = ofst, .file_sz = size, .max_vm_prot = vm_prot_read | vm_prot_write, .init_vm_prot = vm_prot_read | vm_prot_write };
+    pub fn initData(ofst: u64, size: u64, vm_sz: u64, no_of_secs: u32) Self {
+        return Self{ .cmd_sz = ld_cmd_seg_size + (sec_hdr_size * no_of_secs), .seg_name = seg_data, .vm_addr = vm_size + ofst, .vm_sz = vm_sz, .file_ofst = ofst, .file_sz = size, .max_vm_prot = vm_prot_read | vm_prot_write, .init_vm_prot = vm_prot_read | vm_prot_write, .no_of_secs = no_of_secs };
     }
 
-    pub fn initRoData(ofst: u64, size: u64) Self {
-        return Self{ .seg_name = seg_rodata, .vm_addr = vm_size + ofst, .vm_sz = size, .file_ofst = ofst, .file_sz = size, .max_vm_prot = vm_prot_read, .init_vm_prot = vm_prot_read };
-    }
-
-    pub fn initLinkEdit(ofst: u64) Self {
-        return Self{ .seg_name = seg_linkedit, .vm_addr = vm_size + ofst, .vm_sz = 48, .file_ofst = ofst, .file_sz = 48, .max_vm_prot = vm_prot_read, .init_vm_prot = vm_prot_read };
+    pub fn initLinkEdit(vm_ofst: u64, ofst: u64) Self {
+        return Self{ .seg_name = seg_linkedit, .vm_addr = vm_size + vm_ofst, .vm_sz = 48, .file_ofst = ofst, .file_sz = 48, .max_vm_prot = vm_prot_read, .init_vm_prot = vm_prot_read };
     }
 };
 
