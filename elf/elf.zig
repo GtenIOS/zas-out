@@ -32,7 +32,20 @@ pub const Elf = struct {
             for (relocs) |reloca| if (reloca.type == RelocType.Abs) return error.AbsoluteRelocationInPIE;
         }
 
-        const headers_size = elf_hdr_size + sections.len * elf_pht_size;
+        const empty_secs_count = blk: {
+            var empty_secs: usize = 0;
+            for (sections) |sec| {
+                const sec_size = size_blk: {
+                    if (sec.data) |sec_data| {
+                        break :size_blk sec_data.items.len;
+                    }
+                    break :size_blk sec.res_size orelse 0;
+                };
+                if (sec_size == 0) empty_secs += 1;
+            }
+            break :blk empty_secs;
+        };
+        const headers_size = elf_hdr_size + (sections.len - empty_secs_count) * elf_pht_size;
         var secs: std.ArrayList(ElfSection) = std.ArrayList(ElfSection).init(allocator);
         defer secs.deinit();
 
@@ -68,7 +81,15 @@ pub const Elf = struct {
                     },
                     else => return error.UnsupportedSection,
                 }
-            } else {
+            } 
+            else if (sec.type == SectionType.Bss) {
+                if ((sec.res_size orelse 0) == 0) continue;
+                const elf_sec = ElfSection.initFromBss(sec.res_size.?, offset, virt_base + offset);
+                try secs.append(elf_sec);
+                offset = nextOffset(offset, 0, align_size);
+                try pht_entries.append(elf_sec.toPhtEntry(align_size));
+            }
+            else {
                 if (sec.type == SectionType.Text) return error.EmptyTextSection;
             }
         }
@@ -90,10 +111,10 @@ pub const Elf = struct {
                     }
                     return error.InvalidRelocationSize;
                 };
-								defer reloc_addr_bytes.deinit();
-								errdefer reloc_addr_bytes.deinit();
+                defer reloc_addr_bytes.deinit();
+                errdefer reloc_addr_bytes.deinit();
                 std.log.info("Replacing at {d} to {d} with 0x{x}", .{ reloca.loc, reloca.size, secs.items[reloca.sec.idx].vaddr + reloca.ofst_in_sec });
-                try secs.items[0].data.replaceRange(reloca.loc, reloca.size, reloc_addr_bytes.items);
+                try secs.items[0].data.?.replaceRange(reloca.loc, reloca.size, reloc_addr_bytes.items);
             }
         }
 
@@ -110,7 +131,7 @@ pub const Elf = struct {
 
         // Sections
         for (secs.items) |sec, i| {
-            try file.writer().writeAll(sec.data.items);
+            if (sec.data) |sec_data| { try file.writer().writeAll(sec_data.items); }
             // Padding bytes
             // For text section, padding byte is 0x90, i.e. nop instruction
             // For all other sections, padding byte is 0x0

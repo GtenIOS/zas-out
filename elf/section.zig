@@ -15,7 +15,8 @@ pub const SectionType = enum(u4) {
 pub const Section = struct {
     name: []const u8,
     flags: u8, // Must be a combination of `SectionFlag`
-    data: std.ArrayList(u8),
+    data: ?std.ArrayList(u8),
+    res_size: ?usize = null,
     type: SectionType,
     offset: u64,
     vaddr: u64,
@@ -46,6 +47,10 @@ pub const Section = struct {
         return Self{ .name = ".rodata", .flags = @enumToInt(SectionFlag.Read), .data = sec_data, .type = .Loadable, .offset = offset, .vaddr = vaddr, .padding_bytes_size = padding_bytes_size };
     }
 
+    pub fn initFromBss(res_size: usize, offset: u64, vaddr: u64) Self {
+        return Self{ .name = ".bss", .flags = @enumToInt(SectionFlag.Write) | @enumToInt(SectionFlag.Read), .data = null, .res_size = res_size, .type = .Loadable, .offset = offset, .vaddr = vaddr, .padding_bytes_size = 0 };
+    }
+
     pub inline fn alignToSize(self: *Self, alignment: u16) !void {
         if (alignment < 2) return;
         const rem_bytes = alignment - (self.data.items.len % alignment);
@@ -53,6 +58,10 @@ pub const Section = struct {
     }
 
     pub inline fn toPhtEntry(self: Self, align_size: u16) Elf64PhtEntry {
-        return Elf64PhtEntry{ .segment_type = @enumToInt(self.type), .flags = self.flags, .offset = self.offset, .vaddr = self.vaddr, .paddr = self.vaddr, .size_in_file = self.data.items.len, .size_in_mem = self.data.items.len, .p_align = align_size };
+        const file_sz = blk: {
+            if (self.data) |data| { break :blk data.items.len; } else { break :blk 0; }
+        };
+        const res_sz = self.res_size orelse 0;
+        return Elf64PhtEntry{ .segment_type = @enumToInt(self.type), .flags = self.flags, .offset = self.offset, .vaddr = self.vaddr, .paddr = self.vaddr, .size_in_file = file_sz, .size_in_mem = file_sz + res_sz, .p_align = align_size };
     }
 };
