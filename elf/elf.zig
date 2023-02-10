@@ -27,6 +27,7 @@ pub const Elf = struct {
 
     pub fn genPieExe64(allocator: std.mem.Allocator, sections: []const Section, relocations: ?[]const Relocation, out_file_path: []const u8) !void {
         if (sections.len == 0) return error.MissingTextSection;
+        if (sections[0].type != .Text) return error.FirstSectionMustBeText;
 
         if (relocations) |relocs| {
             for (relocs) |reloca| if (reloca.type == RelocType.Abs) return error.AbsoluteRelocationInPIE;
@@ -54,47 +55,41 @@ pub const Elf = struct {
 
         var found_text: bool = false;
         var offset = headers_size;
-        for (sections) |sec, i| {
-            if (sec.data) |sec_data| {
-                switch (sec.type) {
-                    .Text => {
-                        if (i != 0) return error.FirstSectionMustBeText;
-                        if (sec_data.items.len == 0) return error.EmptyTextSection;
-                        const elf_sec = ElfSection.initFromText(sec_data, align_size, offset, virt_base + offset);
-                        try secs.append(elf_sec);
-                        found_text = true;
+        for (sections) |sec| {
+            const data_size = blk: {
+                if (sec.data) |sec_data| { break :blk sec_data.items.len; }
+                else { break :blk 0; }
+            };
+            switch (sec.type) {
+                .Text => {
+                    if (data_size == 0) return error.EmptyTextSection;
+                    const elf_sec = ElfSection.initFromText(sec.data.?, data_size, align_size, offset, virt_base + offset);
+                    try secs.append(elf_sec);
+                    found_text = true;
 
-                        offset = nextOffset(offset, sec_data.items.len, align_size);
-                        try pht_entries.append(elf_sec.toPhtEntry(align_size));
-                    },
-                    .Data => {
-                        const elf_sec = ElfSection.initFromData(sec_data, align_size, offset, virt_base + offset);
-                        try secs.append(elf_sec);
-                        offset = nextOffset(offset, sec_data.items.len, align_size);
-                        try pht_entries.append(elf_sec.toPhtEntry(align_size));
-                    },
-                    .Rodata => {
-                        const elf_sec = ElfSection.initFromRoData(sec_data, align_size, offset, virt_base + offset);
-                        try secs.append(elf_sec);
-                        offset = nextOffset(offset, sec_data.items.len, align_size);
-                        try pht_entries.append(elf_sec.toPhtEntry(align_size));
-                    },
-                    else => return error.UnsupportedSection,
-                }
-            } 
-            else if (sec.type == SectionType.Bss) {
-                if ((sec.res_size orelse 0) == 0) continue;
-                const elf_sec = ElfSection.initFromBss(sec.res_size.?, offset, virt_base + offset);
-                try secs.append(elf_sec);
-                offset = nextOffset(offset, 0, align_size);
-                try pht_entries.append(elf_sec.toPhtEntry(align_size));
-            }
-            else {
-                if (sec.type == SectionType.Text) return error.EmptyTextSection;
+                    offset = nextOffset(offset, data_size, align_size);
+                    try pht_entries.append(elf_sec.toPhtEntry(align_size));
+                },
+                .Data => {
+                    const elf_sec = ElfSection.initFromData(sec.data, data_size, align_size, offset, virt_base + offset);
+                    try secs.append(elf_sec);
+                    offset = nextOffset(offset, data_size, align_size);
+                    try pht_entries.append(elf_sec.toPhtEntry(align_size));
+                },
+                .Rodata => {
+                    const elf_sec = ElfSection.initFromRoData(sec.data, data_size, align_size, offset, virt_base + offset);
+                    try secs.append(elf_sec);
+                    offset = nextOffset(offset, data_size, align_size);
+                    try pht_entries.append(elf_sec.toPhtEntry(align_size));
+                },
+                .Bss => {
+                    const elf_sec = ElfSection.initFromBss(sec.res_size orelse 0, offset, virt_base + offset);
+                    try secs.append(elf_sec);
+                    offset = nextOffset(offset, 0, align_size);
+                    try pht_entries.append(elf_sec.toPhtEntry(align_size));
+                },
             }
         }
-
-        if (!found_text) return error.MissingTextSection;
 
         // Relocations
         if (relocations) |relocs| {
