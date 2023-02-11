@@ -56,6 +56,7 @@ pub const Elf = struct {
         var found_text: bool = false;
         var offset = headers_size;
         for (sections) |sec| {
+            const res_size = sec.res_size orelse 0;
             const data_size = blk: {
                 if (sec.data) |sec_data| { break :blk sec_data.items.len; }
                 else { break :blk 0; }
@@ -74,19 +75,22 @@ pub const Elf = struct {
                     const elf_sec = ElfSection.initFromData(sec.data, data_size, align_size, offset, virt_base + offset);
                     try secs.append(elf_sec);
                     offset = nextOffset(offset, data_size, align_size);
-                    try pht_entries.append(elf_sec.toPhtEntry(align_size));
+
+                    if (data_size > 0) try pht_entries.append(elf_sec.toPhtEntry(align_size));
                 },
                 .Rodata => {
                     const elf_sec = ElfSection.initFromRoData(sec.data, data_size, align_size, offset, virt_base + offset);
                     try secs.append(elf_sec);
                     offset = nextOffset(offset, data_size, align_size);
-                    try pht_entries.append(elf_sec.toPhtEntry(align_size));
+
+                    if (data_size > 0) try pht_entries.append(elf_sec.toPhtEntry(align_size));
                 },
                 .Bss => {
                     const elf_sec = ElfSection.initFromBss(sec.res_size orelse 0, offset, virt_base + offset);
                     try secs.append(elf_sec);
                     offset = nextOffset(offset, 0, align_size);
-                    try pht_entries.append(elf_sec.toPhtEntry(align_size));
+
+                    if (res_size > 0) try pht_entries.append(elf_sec.toPhtEntry(align_size));
                 },
             }
         }

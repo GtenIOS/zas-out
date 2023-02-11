@@ -25,7 +25,7 @@ pub const Section = struct {
 
     pub fn initFromText(sec_data: std.ArrayList(u8), data_size: usize, align_size: u16, offset: u64, vaddr: u64) Self {
         var padding_bytes_size: u16 = 0;
-        if (align_size >= 2) {
+        if (align_size >= 2 and (offset + data_size) % align_size > 0) {
             padding_bytes_size = align_size - @intCast(u16, (offset + data_size) % align_size);
         }
         return Self{ .name = ".text", .flags = @enumToInt(SectionFlag.Exe) | @enumToInt(SectionFlag.Read), .data = sec_data, .type = .Loadable, .offset = offset, .vaddr = vaddr, .padding_bytes_size = padding_bytes_size };
@@ -33,7 +33,7 @@ pub const Section = struct {
 
     pub fn initFromData(sec_data: ?std.ArrayList(u8), data_size: usize, align_size: u16, offset: u64, vaddr: u64) Self {
         var padding_bytes_size: u16 = 0;
-        if (align_size >= 2) {
+        if (align_size >= 2 and data_size % align_size > 0) {
             padding_bytes_size = align_size - @intCast(u16, data_size % align_size);
         }
         return Self{ .name = ".data", .flags = @enumToInt(SectionFlag.Write) | @enumToInt(SectionFlag.Read), .data = sec_data, .type = .Loadable, .offset = offset, .vaddr = vaddr, .padding_bytes_size = padding_bytes_size };
@@ -41,8 +41,8 @@ pub const Section = struct {
 
     pub fn initFromRoData(sec_data: ?std.ArrayList(u8), data_size: usize, align_size: u16, offset: u64, vaddr: u64) Self {
         var padding_bytes_size: u16 = 0;
-        if (align_size >= 2) {
-            padding_bytes_size = align_size - @intCast(u16, (offset + data_size) % align_size);
+        if (align_size >= 2 and data_size % align_size > 0) {
+            padding_bytes_size = align_size - @intCast(u16, data_size % align_size);
         }
         return Self{ .name = ".rodata", .flags = @enumToInt(SectionFlag.Read), .data = sec_data, .type = .Loadable, .offset = offset, .vaddr = vaddr, .padding_bytes_size = padding_bytes_size };
     }
