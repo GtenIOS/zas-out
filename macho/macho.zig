@@ -7,6 +7,7 @@ const reloc = @import("common").reloc;
 const Relocation = reloc.Relocation;
 const RelocType = reloc.RelocType;
 const byte = @import("common").byte;
+const Symbol = @import("common").symbol.Symbol;
 
 const Mach64Hdr = @import("machdr.zig").Mach64Hdr;
 const ldcmd = @import("ldcmd.zig");
@@ -41,6 +42,7 @@ pub const Macho = struct {
         } else return curr_end;
     }
 
+    // TODO: - Refactor the code
     pub fn genPieExe64(allocator: std.mem.Allocator, sections: []const Section, relocations: ?[]const Relocation, out_file_path: []const u8) !void {
         const text_idx: u64 = 0;
         if (sections.len == 0) return error.MissingTextSection;
@@ -48,6 +50,14 @@ pub const Macho = struct {
 
         if (relocations) |relocs| {
             for (relocs) |reloca| if (reloca.type == RelocType.Abs) return error.AbsoluteRelocationInPIE;
+        }
+
+        const start_sym: ?*Symbol = sections[text_idx].findSymbol("_start");
+        if (start_sym == null) {
+            return error.MissingStartSymbol;
+        }
+        if (!start_sym.?.*.did_init) {
+            return error.StartSymbolNotInitialised;
         }
 
         var seg_count: usize = 0;
@@ -110,7 +120,6 @@ pub const Macho = struct {
         const text_seg_padding = page_size - (@intCast(u16, (sec_ofst + text_seg_size)) % page_size);
         const text_sec_start_ofst = sec_ofst + text_seg_padding;
         const data_seg_start_ofst = page_size - ((text_sec_start_ofst + text_seg_size) % page_size);
-        std.log.info("Data seg start: 0x{x}", .{data_seg_start_ofst});
         var data_seg_secs: std.ArrayList(*const MachoSec) = std.ArrayList(*const MachoSec).init(allocator);
         defer data_seg_secs.deinit();
         var text_seg_secs: std.ArrayList(*const MachoSec) = std.ArrayList(*const MachoSec).init(allocator);
@@ -136,45 +145,45 @@ pub const Macho = struct {
                     },
                     else => {},
                 }
-            } 
-            else if (comm_sec.type == .Text) {
+            } else if (comm_sec.type == .Text) {
                 return error.EmptyTextSection;
-            } 
-            else if (comm_sec.type == .Bss) {
+            } else if (comm_sec.type == .Bss) {
                 if ((comm_sec.res_size orelse 0) > 0) {
                     const sec = MachoSec.initBss(vm_size + data_seg_start_ofst + data_seg_file_size, comm_sec.res_size.?);
                     try secs.append(sec);
                     try data_seg_secs.append(&sec);
                 }
-            }
-            else {
+            } else {
                 return error.UnsupportedEmptyDataSection;
             }
-        } 
+        }
 
         const text_seg: MachoSeg = MachoSeg.initFromText(text_seg_secs, page_size, sec_ofst, 0, vm_size);
         try segs.append(text_seg);
         var vm_ofst: u64 = nextOffset(0, text_seg.secSize(false), page_size);
 
         if (added_data_seg) {
-            const data_seg: MachoSeg = MachoSeg.initFromData(data_seg_secs, page_size, vm_ofst, vm_size + vm_ofst); 
+            const data_seg: MachoSeg = MachoSeg.initFromData(data_seg_secs, page_size, vm_ofst, vm_size + vm_ofst);
             try segs.append(data_seg);
         }
         vm_ofst = nextOffset(data_seg_start_ofst, data_seg_virt_size, page_size);
         sec_ofst = nextOffset(data_seg_start_ofst, data_seg_file_size, page_size);
-        const main_entry = @sizeOf(Mach64Hdr) + ld_cmds_size + segs.items[0].padding_bytes_size; // Note: section `.text` does not begin with actual instruction, but padding instead. Hence the `padding_bytes_size` in calculation
+        const text_entry = @sizeOf(Mach64Hdr) + ld_cmds_size + segs.items[0].padding_bytes_size; // Note: section `.text` does not begin with actual instruction, but padding instead. Hence the `padding_bytes_size` in calculation
         // Relocations
         if (relocations) |relocs| {
             for (relocs) |reloca| {
                 const reloc_addr_bytes = blk: {
+                    const reloc_addr_in_sec = secs.items[reloca.sec.idx].vaddr + reloca.ofst_in_sec;
+                    const reloc_used_addr_end = secs.items[text_idx].vaddr + reloca.loc + reloca.size;
+                    const reloc_ofst = @bitCast(isize, reloc_addr_in_sec -% reloc_used_addr_end);
                     if (reloca.size == 1) {
-                        break :blk try byte.intToLEBytes(u8, allocator, @intCast(u8, secs.items[reloca.sec.idx].vaddr + reloca.ofst_in_sec - secs.items[text_idx].vaddr - reloca.loc - reloca.size));
+                        break :blk try byte.intToLEBytes(u8, allocator, @intCast(u8, @truncate(i8, reloc_ofst)));
                     } else if (reloca.size == 2) {
-                        break :blk try byte.intToLEBytes(u16, allocator, @intCast(u16, secs.items[reloca.sec.idx].vaddr + reloca.ofst_in_sec - secs.items[text_idx].vaddr - reloca.loc - reloca.size));
+                        break :blk try byte.intToLEBytes(u16, allocator, @intCast(u16, @truncate(i16, reloc_ofst)));
                     } else if (reloca.size == 4) {
-                        break :blk try byte.intToLEBytes(u32, allocator, @intCast(u32, secs.items[reloca.sec.idx].vaddr + reloca.ofst_in_sec - secs.items[text_idx].vaddr - reloca.loc - reloca.size));
+                        break :blk try byte.intToLEBytes(u32, allocator, @bitCast(u32, @truncate(i32, reloc_ofst)));
                     } else if (reloca.size == 8) {
-                        break :blk try byte.intToLEBytes(u64, allocator, @intCast(u64, secs.items[reloca.sec.idx].vaddr + reloca.ofst_in_sec - secs.items[text_idx].vaddr - reloca.loc - reloca.size));
+                        break :blk try byte.intToLEBytes(u64, allocator, @intCast(u64, @truncate(i64, reloc_ofst)));
                     }
                     return error.InvalidRelocationSize;
                 };
@@ -231,7 +240,7 @@ pub const Macho = struct {
         try file.writer().writeAll(std.mem.asBytes(&ld_cmd_dylib));
 
         // Main
-        const ld_cmd_main = LoadCmdMain.init(main_entry);
+        const ld_cmd_main = LoadCmdMain.init(text_entry + start_sym.?.*.ofst_in_sec);
         try file.writer().writeAll(std.mem.asBytes(&ld_cmd_main));
 
         // Sections
