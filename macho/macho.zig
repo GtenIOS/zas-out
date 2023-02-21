@@ -42,24 +42,84 @@ pub const Macho = struct {
         } else return curr_end;
     }
 
-    // TODO: - Refactor the code
-    pub fn genPieExe64(allocator: std.mem.Allocator, sections: []const Section, relocations: ?[]const Relocation, out_file_path: []const u8) !void {
-        const text_idx: u64 = 0;
-        if (sections.len == 0) return error.MissingTextSection;
-        if (sections[text_idx].type != .Text) return error.FirstSectionShouldAlwaysBeText;
+    fn machoSegsFromMachoSecs(allocator: std.mem.Allocator, sections: []const MachoSec, sec_ofst: usize) !std.ArrayList(MachoSeg) {
+        var data_seg_secs: std.ArrayList(MachoSec) = std.ArrayList(MachoSec).init(allocator);
+        errdefer data_seg_secs.deinit();
+        var text_seg_secs: std.ArrayList(MachoSec) = std.ArrayList(MachoSec).init(allocator);
+        errdefer text_seg_secs.deinit();
+        for (sections) |macho_sec| {
+            // Skip empty sections
+            const sec_size = blk: {
+                if (macho_sec.data) |data| {
+                    break :blk data.items.len;
+                } else {
+                    break :blk macho_sec.res_size orelse 0;
+                }
+            };
+            if (sec_size == 0) continue;
 
-        if (relocations) |relocs| {
-            for (relocs) |reloca| if (reloca.type == RelocType.Abs) return error.AbsoluteRelocationInPIE;
+            switch (macho_sec.type) {
+                .Text, .Const => try text_seg_secs.append(macho_sec),
+                else => try data_seg_secs.append(macho_sec),
+            }
         }
 
-        const start_sym: ?*Symbol = sections[text_idx].findSymbol("_start");
-        if (start_sym == null) {
-            return error.MissingStartSymbol;
-        }
-        if (!start_sym.?.*.did_init) {
-            return error.StartSymbolNotInitialised;
+        var segs: std.ArrayList(MachoSeg) = std.ArrayList(MachoSeg).init(allocator);
+        errdefer segs.deinit();
+
+        const text_seg: MachoSeg = MachoSeg.initFromText(text_seg_secs, page_size, sec_ofst, 0, vm_size);
+        try segs.append(text_seg);
+        var vm_ofst: u64 = nextOffset(0, text_seg.secSize(false), page_size);
+
+        if (data_seg_secs.items.len > 0) {
+            const data_seg: MachoSeg = MachoSeg.initFromData(data_seg_secs, page_size, vm_ofst, vm_size + vm_ofst);
+            try segs.append(data_seg);
         }
 
+        return segs;
+    }
+
+    fn convCommSecsToMachoSecs(allocator: std.mem.Allocator, sections: []const Section, sec_ofst: usize, text_seg_size: usize, text_sec_size: usize, data_seg_file_size: usize) !std.ArrayList(MachoSec) {
+        const text_seg_padding = page_size - (@intCast(u16, (sec_ofst + text_seg_size)) % page_size);
+        const text_sec_start_ofst = sec_ofst + text_seg_padding;
+        const data_seg_start_ofst = page_size - ((text_sec_start_ofst + text_seg_size) % page_size);
+        var secs: std.ArrayList(MachoSec) = std.ArrayList(MachoSec).init(allocator);
+        errdefer secs.deinit();
+        for (sections) |comm_sec| {
+            if (comm_sec.data) |sec_data| {
+                switch (comm_sec.type) {
+                    .Text => {
+                        const sec = MachoSec.initText(sec_data, text_sec_start_ofst, vm_size + text_sec_start_ofst);
+                        try secs.append(sec);
+                    },
+                    .Rodata => {
+                        const const_sec_start_ofst = text_sec_start_ofst + text_sec_size;
+                        const sec = MachoSec.initConst(sec_data, const_sec_start_ofst, vm_size + const_sec_start_ofst);
+                        try secs.append(sec);
+                    },
+                    .Data => {
+                        const sec = MachoSec.initData(sec_data, data_seg_start_ofst, vm_size + data_seg_start_ofst);
+                        try secs.append(sec);
+                    },
+                    else => {},
+                }
+            } else if (comm_sec.type == .Text) {
+                return error.EmptyTextSection;
+            } else if (comm_sec.type == .Bss) {
+                if ((comm_sec.res_size orelse 0) > 0) {
+                    const sec = MachoSec.initBss(vm_size + data_seg_start_ofst + data_seg_file_size, comm_sec.res_size.?);
+                    try secs.append(sec);
+                }
+            } else {
+                return error.UnsupportedEmptyDataSection;
+            }
+        }
+
+        return secs;
+    }
+
+    const CountAndSizesTuple = std.meta.Tuple(&[_]type{ usize, [2]usize, [2]usize, usize });
+    fn determineSegCountAndSize(sections: []const Section) CountAndSizesTuple {
         var seg_count: usize = 0;
         var text_seg_size: usize = 0;
         var text_sec_size: usize = 0;
@@ -67,7 +127,11 @@ pub const Macho = struct {
         var data_seg_virt_size: usize = 0;
         var added_text_seg: bool = false;
         var added_data_seg: bool = false;
+        var total_sec_count: usize = 0;
         for (sections) |comm_sec| {
+            if (comm_sec.virt_size() == 0) continue;
+
+            total_sec_count += 1;
             switch (comm_sec.type) {
                 .Text => {
                     if (!added_text_seg) {
@@ -108,65 +172,48 @@ pub const Macho = struct {
             }
         }
 
-        const ld_cmds_size = (seg_count + 2) * ld_cmd_seg_size + ld_cmd_dyldinfo_size + ld_cmd_symtab_size + ld_cmd_dysymtab_size + ld_cmd_dylinker_size + ld_cmd_dylib_size + ld_cmd_main_size + (sections.len * sec_hdr_size);
+        return .{ seg_count, .{ text_sec_size, text_seg_size }, .{ data_seg_file_size, data_seg_virt_size }, total_sec_count };
+    }
+
+    // TODO: - Refactor the code
+    pub fn genPieExe64(allocator: std.mem.Allocator, sections: []const Section, relocations: ?[]const Relocation, out_file_path: []const u8) !void {
+        const text_idx: u64 = 0;
+        if (sections.len == 0) return error.MissingTextSection;
+        if (sections[text_idx].type != .Text) return error.FirstSectionShouldAlwaysBeText;
+
+        if (relocations) |relocs| {
+            for (relocs) |reloca| if (reloca.type == RelocType.Abs) return error.AbsoluteRelocationInPIE;
+        }
+
+        const start_sym: ?*Symbol = sections[text_idx].findSymbol("_start");
+        if (start_sym == null) {
+            return error.MissingStartSymbol;
+        }
+        if (!start_sym.?.*.did_init) {
+            return error.StartSymbolNotInitialised;
+        }
+
+        const seg_count_and_size: CountAndSizesTuple = determineSegCountAndSize(sections);
+        const seg_count = seg_count_and_size[0];
+        const ld_cmds_size = (seg_count + 2) * ld_cmd_seg_size + ld_cmd_dyldinfo_size + ld_cmd_symtab_size + ld_cmd_dysymtab_size + ld_cmd_dylinker_size + ld_cmd_dylib_size + ld_cmd_main_size + (seg_count_and_size[3] * sec_hdr_size);
         const no_ld_cmds = 8 + seg_count;
-
-        var segs: std.ArrayList(MachoSeg) = std.ArrayList(MachoSeg).init(allocator);
-        defer segs.deinit();
-        var secs: std.ArrayList(MachoSec) = std.ArrayList(MachoSec).init(allocator);
-        defer secs.deinit();
-
         var sec_ofst: u64 = @sizeOf(Mach64Hdr) + ld_cmds_size;
-        const text_seg_padding = page_size - (@intCast(u16, (sec_ofst + text_seg_size)) % page_size);
-        const text_sec_start_ofst = sec_ofst + text_seg_padding;
-        const data_seg_start_ofst = page_size - ((text_sec_start_ofst + text_seg_size) % page_size);
-        var data_seg_secs: std.ArrayList(*const MachoSec) = std.ArrayList(*const MachoSec).init(allocator);
-        defer data_seg_secs.deinit();
-        var text_seg_secs: std.ArrayList(*const MachoSec) = std.ArrayList(*const MachoSec).init(allocator);
-        defer text_seg_secs.deinit();
-        for (sections) |comm_sec| {
-            if (comm_sec.data) |sec_data| {
-                switch (comm_sec.type) {
-                    .Text => {
-                        const sec = MachoSec.initText(sec_data, text_sec_start_ofst, vm_size + text_sec_start_ofst);
-                        try secs.append(sec);
-                        try text_seg_secs.append(&sec);
-                    },
-                    .Rodata => {
-                        const const_sec_start_ofst = text_sec_start_ofst + text_sec_size;
-                        const sec = MachoSec.initConst(sec_data, const_sec_start_ofst, vm_size + const_sec_start_ofst);
-                        try secs.append(sec);
-                        try text_seg_secs.append(&sec);
-                    },
-                    .Data => {
-                        const sec = MachoSec.initData(sec_data, data_seg_start_ofst, vm_size + data_seg_start_ofst);
-                        try secs.append(sec);
-                        try data_seg_secs.append(&sec);
-                    },
-                    else => {},
-                }
-            } else if (comm_sec.type == .Text) {
-                return error.EmptyTextSection;
-            } else if (comm_sec.type == .Bss) {
-                if ((comm_sec.res_size orelse 0) > 0) {
-                    const sec = MachoSec.initBss(vm_size + data_seg_start_ofst + data_seg_file_size, comm_sec.res_size.?);
-                    try secs.append(sec);
-                    try data_seg_secs.append(&sec);
-                }
-            } else {
-                return error.UnsupportedEmptyDataSection;
+
+        var secs = try convCommSecsToMachoSecs(allocator, sections, sec_ofst, seg_count_and_size[1][1], seg_count_and_size[1][0], seg_count_and_size[2][0]);
+        defer secs.deinit();
+        var segs = try machoSegsFromMachoSecs(allocator, secs.items, sec_ofst);
+        defer {
+            for (segs.items) |seg| {
+                seg.deinit();
             }
+            segs.deinit();
         }
 
-        const text_seg: MachoSeg = MachoSeg.initFromText(text_seg_secs, page_size, sec_ofst, 0, vm_size);
-        try segs.append(text_seg);
-        var vm_ofst: u64 = nextOffset(0, text_seg.secSize(false), page_size);
-
-        if (added_data_seg) {
-            const data_seg: MachoSeg = MachoSeg.initFromData(data_seg_secs, page_size, vm_ofst, vm_size + vm_ofst);
-            try segs.append(data_seg);
-        }
-        vm_ofst = nextOffset(data_seg_start_ofst, data_seg_virt_size, page_size);
+        const data_seg_virt_size = seg_count_and_size[2][1];
+        const text_seg_size = seg_count_and_size[1][1];
+        const data_seg_file_size = seg_count_and_size[2][0];
+        const data_seg_start_ofst = page_size - ((secs.items[0].offset + text_seg_size) % page_size);
+        var vm_ofst = nextOffset(data_seg_start_ofst, data_seg_virt_size, page_size);
         sec_ofst = nextOffset(data_seg_start_ofst, data_seg_file_size, page_size);
         const text_entry = @sizeOf(Mach64Hdr) + ld_cmds_size + segs.items[0].padding_bytes_size; // Note: section `.text` does not begin with actual instruction, but padding instead. Hence the `padding_bytes_size` in calculation
         // Relocations
@@ -251,11 +298,9 @@ pub const Macho = struct {
             // For all other sections, padding byte is 0x0
             if (i == 0 and seg.padding_bytes_size > 0) try file.writer().writeByteNTimes(0x90, seg.padding_bytes_size);
 
-            for (seg.secs.items) |sec| {
-                if (sec.data) |sec_data| {
+            for (seg.secs.items) |sec|
+                if (sec.data) |sec_data|
                     try file.writer().writeAll(sec_data.items);
-                }
-            }
 
             // For section(s) othar than Text, they are followed by their padding bytes
             if (i > 0 and seg.padding_bytes_size > 0) try file.writer().writeByteNTimes(0x0, seg.padding_bytes_size);
